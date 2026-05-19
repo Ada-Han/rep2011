@@ -200,15 +200,8 @@ def restrict_reference_mode(reference_model, reference_mode_vector, coarse_model
     return restricted_values
 
 
-GAUSS_POINTS = [
-    (1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0),
-    (2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0),
-    (1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0),
-]
-
-
 def build_modal_spatial_moments(coarse_solution, reference_solution):
-    """预计算第二组误差公式里需要的空间矩量。"""
+    """预计算第二组误差公式里需要的空间矩量（VEM 多边形积分）。"""
     coarse_model = coarse_solution["model"]
     reference_mode_vector_restricted = restrict_reference_mode(
         reference_solution["model"],
@@ -227,27 +220,38 @@ def build_modal_spatial_moments(coarse_solution, reference_solution):
 
     for element in coarse_model.elements:
         node_coords = coarse_model.nodes[element]
+        diameter = coarse_model.calculate_element_diameter(node_coords)
         coarse_local_values = coarse_solution["mode_vector"][element]
         reference_local_values = reference_mode_vector_restricted[element]
 
-        area = 0.5 * abs(
-            (node_coords[1, 0] - node_coords[0, 0]) * (node_coords[2, 1] - node_coords[0, 1])
-            - (node_coords[2, 0] - node_coords[0, 0]) * (node_coords[1, 1] - node_coords[0, 1])
+        def coarse_integrand(px, py):
+            return coarse_model.evaluate_solution_at_point(
+                coarse_local_values, np.array([px, py]), node_coords, diameter
+            )
+
+        def reference_integrand(px, py):
+            return coarse_model.evaluate_solution_at_point(
+                reference_local_values, np.array([px, py]), node_coords, diameter
+            )
+
+        moments["domain_measure"] += coarse_model._integrate_on_polygon(
+            node_coords, lambda px, py: 1.0
         )
-
-        for lam1, lam2, weight in GAUSS_POINTS:
-            lam3 = 1.0 - lam1 - lam2
-            quadrature_weight = area * weight
-
-            coarse_value = lam1 * coarse_local_values[0] + lam2 * coarse_local_values[1] + lam3 * coarse_local_values[2]
-            reference_value = lam1 * reference_local_values[0] + lam2 * reference_local_values[1] + lam3 * reference_local_values[2]
-
-            moments["domain_measure"] += quadrature_weight
-            moments["coarse_mode_mean"] += quadrature_weight * coarse_value
-            moments["reference_mode_mean"] += quadrature_weight * reference_value
-            moments["coarse_mode_square"] += quadrature_weight * coarse_value * coarse_value
-            moments["reference_mode_square"] += quadrature_weight * reference_value * reference_value
-            moments["cross_mode_product"] += quadrature_weight * coarse_value * reference_value
+        moments["coarse_mode_mean"] += coarse_model._integrate_on_polygon(
+            node_coords, coarse_integrand
+        )
+        moments["reference_mode_mean"] += coarse_model._integrate_on_polygon(
+            node_coords, reference_integrand
+        )
+        moments["coarse_mode_square"] += coarse_model._integrate_on_polygon(
+            node_coords, lambda px, py: coarse_integrand(px, py) ** 2
+        )
+        moments["reference_mode_square"] += coarse_model._integrate_on_polygon(
+            node_coords, lambda px, py: reference_integrand(px, py) ** 2
+        )
+        moments["cross_mode_product"] += coarse_model._integrate_on_polygon(
+            node_coords, lambda px, py: coarse_integrand(px, py) * reference_integrand(px, py)
+        )
 
     return moments
 

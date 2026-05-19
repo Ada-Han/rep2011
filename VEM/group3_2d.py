@@ -94,23 +94,8 @@ def build_initial_states(model, dt):
     return age_grid, initial_states
 
 
-def _triangle_area(node_coords):
-    """三角形面积。"""
-    return 0.5 * abs(
-        (node_coords[1, 0] - node_coords[0, 0]) * (node_coords[2, 1] - node_coords[0, 1])
-        - (node_coords[2, 0] - node_coords[0, 0]) * (node_coords[1, 1] - node_coords[0, 1])
-    )
-
-
-GAUSS_3PT = [
-    (1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0),
-    (2.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0),
-    (1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0),
-]
-
-
 def space_age_l2_relative_error(model, numerical_states, age_grid, time_value):
-    """用单元高斯积分计算空间-年龄 L2 相对误差。"""
+    """用 VEM 多边形积分计算空间-年龄 L2 相对误差。"""
     dt = age_grid[1] - age_grid[0]
     error_accumulator = 0.0
     exact_accumulator = 0.0
@@ -121,26 +106,26 @@ def space_age_l2_relative_error(model, numerical_states, age_grid, time_value):
 
         for element in model.elements:
             node_coords = model.nodes[element]
-            area = _triangle_area(node_coords)
+            diameter = model.calculate_element_diameter(node_coords)
             local_values = state_vector[element]
 
-            for lam1, lam2, weight in GAUSS_3PT:
-                lam3 = 1.0 - lam1 - lam2
-                quadrature_weight = area * weight
-                physical_point = lam1 * node_coords[0] + lam2 * node_coords[1] + lam3 * node_coords[2]
+            def error_sq(px, py, _lv=local_values, _nc=node_coords, _d=diameter, _a=age_value):
+                num = model.evaluate_solution_at_point(_lv, np.array([px, py]), _nc, _d)
+                exa = float(exact_solution(np.array([[px, py]]), _a, time_value)[0])
+                return (num - exa) ** 2
 
-                numerical_value = lam1 * local_values[0] + lam2 * local_values[1] + lam3 * local_values[2]
-                exact_value = float(exact_solution(physical_point.reshape(1, 2), age_value, time_value)[0])
-                error_value = numerical_value - exact_value
+            def ref_sq(px, py, _nc=node_coords, _a=age_value):
+                exa = float(exact_solution(np.array([[px, py]]), _a, time_value)[0])
+                return exa ** 2
 
-                error_accumulator += age_weight * quadrature_weight * error_value * error_value
-                exact_accumulator += age_weight * quadrature_weight * exact_value * exact_value
+            error_accumulator += age_weight * model._integrate_on_polygon(node_coords, error_sq)
+            exact_accumulator += age_weight * model._integrate_on_polygon(node_coords, ref_sq)
 
     return math.sqrt(dt * error_accumulator) / math.sqrt(dt * exact_accumulator)
 
 
 def space_age_h1_relative_error(model, numerical_states, age_grid, time_value):
-    """用单元高斯积分计算空间-年龄 H1 半范数相对误差。"""
+    """用 VEM 多边形积分计算空间-年龄 H1 半范数相对误差。"""
     dt = age_grid[1] - age_grid[0]
     error_accumulator = 0.0
     exact_accumulator = 0.0
@@ -151,30 +136,21 @@ def space_age_h1_relative_error(model, numerical_states, age_grid, time_value):
 
         for element in model.elements:
             node_coords = model.nodes[element]
-            area = _triangle_area(node_coords)
+            diameter = model.calculate_element_diameter(node_coords)
             local_values = state_vector[element]
+            numerical_gradient = model.evaluate_gradient_in_element(local_values, node_coords, diameter)
 
-            # P1 梯度: dphi/dx, dphi/dy 通过 Jacobian 逆
-            x1, y1 = node_coords[0]
-            x2, y2 = node_coords[1]
-            x3, y3 = node_coords[2]
-            det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
-            dphi_dx = np.array([y2 - y3, y3 - y1, y1 - y2]) / det
-            dphi_dy = np.array([x3 - x2, x1 - x3, x2 - x1]) / det
-            numerical_gradient = np.array(
-                [np.dot(local_values, dphi_dx), np.dot(local_values, dphi_dy)],
-                dtype=float,
-            )
+            def error_grad_sq(px, py, _ng=numerical_gradient, _a=age_value):
+                exa_grad = exact_solution_gradient(np.array([[px, py]]), _a, time_value)[0]
+                diff = _ng - exa_grad
+                return float(np.dot(diff, diff))
 
-            for lam1, lam2, weight in GAUSS_3PT:
-                lam3 = 1.0 - lam1 - lam2
-                quadrature_weight = area * weight
-                physical_point = lam1 * node_coords[0] + lam2 * node_coords[1] + lam3 * node_coords[2]
-                exact_gradient = exact_solution_gradient(physical_point.reshape(1, 2), age_value, time_value)[0]
-                error_gradient = numerical_gradient - exact_gradient
+            def ref_grad_sq(px, py, _a=age_value):
+                exa_grad = exact_solution_gradient(np.array([[px, py]]), _a, time_value)[0]
+                return float(np.dot(exa_grad, exa_grad))
 
-                error_accumulator += age_weight * quadrature_weight * float(np.dot(error_gradient, error_gradient))
-                exact_accumulator += age_weight * quadrature_weight * float(np.dot(exact_gradient, exact_gradient))
+            error_accumulator += age_weight * model._integrate_on_polygon(node_coords, error_grad_sq)
+            exact_accumulator += age_weight * model._integrate_on_polygon(node_coords, ref_grad_sq)
 
     return math.sqrt(dt * error_accumulator) / math.sqrt(dt * exact_accumulator)
 
