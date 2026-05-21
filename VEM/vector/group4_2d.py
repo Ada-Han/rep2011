@@ -15,25 +15,28 @@ from group3_2d import (
 
 
 NX_COUPLED_LIST = [8, 16, 32, 64, 128]
-#DT_TO_H_RATIO = 0.5
-DT_TO_H_RATIO = 1.0
+DT_TO_H_RATIO = 0.5
+#DT_TO_H_RATIO = 1.0
 
 
-def coupled_time_step(nx_elements):
-    """取 dt = da 近似 0.5h，并保证能整除年龄区间和终止时间。"""
+def coupled_time_step(nx_elements, step_type='h'):
+    """取 dt = da 近似 0.5h 或 h^2，并保证能整除年龄区间和终止时间。"""
     h_value = 1.0 / nx_elements
-    target_dt = DT_TO_H_RATIO * h_value
+    if step_type == 'h2':
+        target_dt = h_value ** 2
+    else:
+        target_dt = DT_TO_H_RATIO * h_value
     n_steps = int(round(1.0 / target_dt))
     return 1.0 / n_steps
 
 
-def compute_coupled_convergence():
+def compute_coupled_convergence(step_type='h'):
     """计算空间-时间同步加密收敛表。"""
     results = []
 
     for nx_elements in NX_COUPLED_LIST:
         h_value = 1.0 / nx_elements
-        dt = coupled_time_step(nx_elements)
+        dt = coupled_time_step(nx_elements, step_type)
         model = build_model(nx_elements)
         age_grid, numerical_states = solve_manufactured_problem(model, dt, T_EVAL)
         l2_error = space_age_l2_relative_error(model, numerical_states, age_grid, T_EVAL)
@@ -60,9 +63,10 @@ def compute_coupled_convergence():
     return results
 
 
-def print_coupled_table(results):
+def print_coupled_table(results, step_type='h'):
     """打印空间-时间同步加密误差表。"""
-    print("2D Group-4 Manufactured Solution: coupled space-time convergence")
+    step_desc = "dt ~ h^2" if step_type == 'h2' else "dt ~ 0.5h"
+    print(f"2D Group-4 Manufactured Solution: coupled space-time convergence ({step_desc}, vectorized)")
     print("=" * 116)
     print(
         f"{'nx=ny':>10} {'h':>12} {'dt=da':>12} {'L2 error':>16} {'L2 rate':>10} "
@@ -91,7 +95,7 @@ def print_timing_summary(total_elapsed):
     print(f"Total computation time before plot: {total_elapsed:.2f} seconds")
 
 
-def plot_group4_results(results):
+def plot_group4_results(results, step_type='h'):
     """绘制空间-时间同步加密收敛图。"""
     h_values = np.array([row["h"] for row in results])
     l2_errors = np.array([row["l2_error"] for row in results])
@@ -107,30 +111,37 @@ def plot_group4_results(results):
     plt.loglog(h_values, h1_reference, "k:", linewidth=1.5, label="slope 1")
     plt.xlabel("Mesh size h")
     plt.ylabel("Relative error")
-    plt.title("Group 4: coupled space-time convergence")
+    step_desc = "dt ~ h^2" if step_type == 'h2' else "dt ~ 0.5h"
+    plt.title(f"Group 4: coupled space-time convergence ({step_desc})")
     plt.grid(True, which="both", alpha=0.3)
     plt.legend()
     plt.tight_layout()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run the fourth 2D coupled refinement experiment.")
+    parser = argparse.ArgumentParser(description="Run the fourth 2D coupled refinement experiment (vectorized).")
     parser.add_argument(
         "--plot",
         action="store_true",
         help="Show the coupled space-time convergence plot.",
     )
+    parser.add_argument(
+        "--step-type",
+        choices=['h', 'h2'],
+        default='h',
+        help="Set time step size scaling: 'h' for dt ~ 0.5h, 'h2' for dt ~ h^2.",
+    )
     args = parser.parse_args()
 
     total_start = time.perf_counter()
-    results = compute_coupled_convergence()
+    results = compute_coupled_convergence(args.step_type)
     total_elapsed = time.perf_counter() - total_start
 
-    print_coupled_table(results)
+    print_coupled_table(results, args.step_type)
     print_timing_summary(total_elapsed)
 
     if args.plot:
-        plot_group4_results(results)
+        plot_group4_results(results, args.step_type)
         plt.show()
 
 

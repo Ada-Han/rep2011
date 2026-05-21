@@ -1,8 +1,6 @@
-import math
 import numpy as np
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
-
 
 class ASP_VEM2D:
     def __init__(
@@ -49,6 +47,16 @@ class ASP_VEM2D:
 
         self.mass_matrix = self.build_mass_matrix()
         self.stiffness_matrix = self.build_stiffness_matrix()
+
+        # 预计算缓存，在需要时按需计算
+        self.Pi_star_all = None
+        self.diameters = None
+        self.centroids = None
+        self.areas = None
+        self.quad_points = None
+        self.quad_weights = None
+        self.quad_points_flat = None
+        self.quad_m_bases = None
 
     def build_rectangular_mesh(self):
         """生成规则矩形区域上的三角形网格。"""
@@ -412,15 +420,86 @@ class ASP_VEM2D:
 
         return result
 
-    # ── 误差计算（基于 VEM Π 投影，多边形形心剖分积分）────────
+    # ── 向量化高性能预计算与积分 ───────────────────────────────────
 
-    def compute_l2_error(self, numerical_states, exact_func, age_grid, time_value):
-        """空间-年龄 L2 相对误差。
+    def precompute_vem_projectors(self):
+        """预计算所有单元的 VEM 投影器、直径、形心和面积，加速积分计算。"""
+        if self.Pi_star_all is not None:
+            return
 
-        exact_func(nodes, age, time) -> 节点处精确值数组。
-        通过 VEM Π 投影在积分点处评估数值解，多边形形心剖分积分。
-        """
-        import math
+        n_elements = len(self.elements)
+        self.Pi_star_all = np.zeros((n_elements, 3, 3))
+        self.diameters = np.zeros(n_elements)
+        self.centroids = np.zeros((n_elements, 2))
+        self.areas = np.zeros(n_elements)
+
+        for e, element in enumerate(self.elements):
+            node_coords = self.nodes[element]
+            diameter = self.calculate_element_diameter(node_coords)
+            xc, yc = np.mean(node_coords, axis=0)
+            B = self.calculate_B_matrix(node_coords, diameter)
+            D = self.calculate_D_matrix(node_coords, xc, yc, diameter)
+            G = self.calculate_G_matrix(B, D)
+            Pi_star = np.linalg.solve(G, B)
+
+            self.Pi_star_all[e] = Pi_star
+            self.diameters[e] = diameter
+            self.centroids[e] = [xc, yc]
+            self.areas[e] = self.calculate_element_area(element)
+
+    def precompute_quadrature_points(self):
+        """预计算所有单元上的 9 个积分点坐标、积分权重和多项式基矩阵，实现全向量化积分。"""
+        if self.quad_points is not None:
+            return
+
+        self.precompute_vem_projectors()
+        n_elements = len(self.elements)
+        self.quad_points = np.zeros((n_elements, 9, 2))
+        self.quad_weights = np.zeros((n_elements, 9))
+
+        quadrature = self.get_quadrature()
+
+        for e, element in enumerate(self.elements):
+            node_coords = self.nodes[element]
+            center = self.centroids[e]
+            idx = 0
+            for i in range(3):
+                a = center
+                b = node_coords[i]
+                c = node_coords[(i + 1) % 3]
+
+                tri_area = 0.5 * abs(
+                    (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+                )
+                if tri_area < 1e-15:
+                    continue
+
+                for xi, eta, weight in quadrature:
+                    lam = 1.0 - xi - eta
+                    px = lam * a[0] + xi * b[0] + eta * c[0]
+                    py = lam * a[1] + xi * b[1] + eta * c[1]
+                    self.quad_points[e, idx, :] = [px, py]
+                    self.quad_weights[e, idx] = 2.0 * tri_area * weight
+                    idx += 1
+
+        self.quad_points_flat = self.quad_points.reshape(-1, 2)
+
+        # 预计算单项式基的值 m = [1, (x-xc)/d, (y-yc)/d]
+        px_all = self.quad_points[:, :, 0]
+        py_all = self.quad_points[:, :, 1]
+        xc_all = self.centroids[:, 0][:, np.newaxis]
+        yc_all = self.centroids[:, 1][:, np.newaxis]
+        diameter_all = self.diameters[:, np.newaxis]
+
+        m0 = np.ones((n_elements, 9))
+        m1 = (px_all - xc_all) / diameter_all
+        m2 = (py_all - yc_all) / diameter_all
+        self.quad_m_bases = np.stack([m0, m1, m2], axis=2) # (n_elements, 9, 3)
+
+    def compute_l2_error_vectorized(self, numerical_states, exact_func, age_grid, time_value):
+        """以极高速度（全向量化）计算空间-年龄 L2 相对误差。"""
+        self.precompute_quadrature_points()
+        n_elements = len(self.elements)
 
         dt = age_grid[1] - age_grid[0]
         error_accumulator = 0.0
@@ -430,36 +509,27 @@ class ASP_VEM2D:
             age_weight = 0.5 if age_index in (0, len(age_grid) - 1) else 1.0
             state_vector = numerical_states[age_index, :]
 
-            for element in self.elements:
-                node_coords = self.nodes[element]
-                diameter = self.calculate_element_diameter(node_coords)
-                xc, yc = self._polygon_centroid(node_coords)
+            # 批量提取单元顶点上的数值
+            local_values_all = state_vector[self.elements] # (n_elements, 3)
+            # 批量投影计算 VEM 线性多项式系数 coeffs = Pi_star_all @ local_values_all
+            coefficients_all = np.einsum('eij,ej->ei', self.Pi_star_all, local_values_all) # (n_elements, 3)
 
-                local_values = state_vector[element]
-                coefficients = self.evaluate_solution_in_element(local_values, node_coords, diameter)
+            # 批量在所有 9 个积分点上求得数值解的值 m_all @ coefficients_all
+            numerical_value_all = np.einsum('eki,ei->ek', self.quad_m_bases, coefficients_all) # (n_elements, 9)
 
-                def l2_integrand(px, py):
-                    m = np.array([1.0, (px - xc) / diameter, (py - yc) / diameter])
-                    numerical_value = float(m @ coefficients)
-                    exact_value = float(exact_func(np.array([[px, py]]), age_value, time_value)[0])
-                    diff = numerical_value - exact_value
-                    return diff * diff
+            # 批量计算积分点处的精确解
+            exact_value_all = exact_func(self.quad_points_flat, age_value, time_value).reshape(n_elements, 9)
 
-                def ref_integrand(px, py):
-                    exact_value = float(exact_func(np.array([[px, py]]), age_value, time_value)[0])
-                    return exact_value * exact_value
+            diff = numerical_value_all - exact_value_all
+            error_accumulator += age_weight * np.sum(diff * diff * self.quad_weights)
+            exact_accumulator += age_weight * np.sum(exact_value_all * exact_value_all * self.quad_weights)
 
-                error_accumulator += age_weight * self._integrate_on_polygon(node_coords, l2_integrand)
-                exact_accumulator += age_weight * self._integrate_on_polygon(node_coords, ref_integrand)
+        return np.sqrt(dt * error_accumulator) / np.sqrt(dt * exact_accumulator)
 
-        return math.sqrt(dt * error_accumulator) / math.sqrt(dt * exact_accumulator)
-
-    def compute_h1_error(self, numerical_states, exact_grad_func, age_grid, time_value):
-        """空间-年龄 H1 半范数相对误差。
-
-        exact_grad_func(points, age, time) -> 梯度数组 (N, 2)。
-        通过 VEM Π 投影评估单元内梯度，多边形形心剖分积分。
-        """
+    def compute_h1_error_vectorized(self, numerical_states, exact_grad_func, age_grid, time_value):
+        """以极高速度（全向量化）计算空间-年龄 H1 半范数相对误差。"""
+        self.precompute_quadrature_points()
+        n_elements = len(self.elements)
 
         dt = age_grid[1] - age_grid[0]
         error_accumulator = 0.0
@@ -469,26 +539,28 @@ class ASP_VEM2D:
             age_weight = 0.5 if age_index in (0, len(age_grid) - 1) else 1.0
             state_vector = numerical_states[age_index, :]
 
-            for element in self.elements:
-                node_coords = self.nodes[element]
-                diameter = self.calculate_element_diameter(node_coords)
+            # 批量投影计算 VEM 线性多项式系数
+            local_values_all = state_vector[self.elements] # (n_elements, 3)
+            coefficients_all = np.einsum('eij,ej->ei', self.Pi_star_all, local_values_all) # (n_elements, 3)
 
-                local_values = state_vector[element]
-                numerical_gradient = self.evaluate_gradient_in_element(local_values, node_coords, diameter)
+            # 单元内的数值梯度是常数: [c1 / d, c2 / d]
+            du_dx = coefficients_all[:, 1] / self.diameters
+            du_dy = coefficients_all[:, 2] / self.diameters
+            numerical_gradient_all = np.column_stack([du_dx, du_dy]) # (n_elements, 2)
 
-                def h1_integrand(px, py):
-                    exact_gradient = exact_grad_func(np.array([[px, py]]), age_value, time_value)[0]
-                    error_gradient = numerical_gradient - exact_gradient
-                    return float(np.dot(error_gradient, error_gradient))
+            # 批量计算所有积分点上的精确梯度
+            exact_grad_all = exact_grad_func(self.quad_points_flat, age_value, time_value).reshape(n_elements, 9, 2)
 
-                def ref_integrand(px, py):
-                    exact_gradient = exact_grad_func(np.array([[px, py]]), age_value, time_value)[0]
-                    return float(np.dot(exact_gradient, exact_gradient))
+            # 计算梯度误差
+            error_grad = numerical_gradient_all[:, np.newaxis, :] - exact_grad_all # (n_elements, 9, 2)
+            error_grad_sq = np.sum(error_grad * error_grad, axis=2) # (n_elements, 9)
 
-                error_accumulator += age_weight * self._integrate_on_polygon(node_coords, h1_integrand)
-                exact_accumulator += age_weight * self._integrate_on_polygon(node_coords, ref_integrand)
+            error_accumulator += age_weight * np.sum(error_grad_sq * self.quad_weights)
 
-        return math.sqrt(dt * error_accumulator) / math.sqrt(dt * exact_accumulator)
+            exact_grad_sq = np.sum(exact_grad_all * exact_grad_all, axis=2) # (n_elements, 9)
+            exact_accumulator += age_weight * np.sum(exact_grad_sq * self.quad_weights)
+
+        return np.sqrt(dt * error_accumulator) / np.sqrt(dt * exact_accumulator)
 
     @staticmethod
     def compute_convergence_rates(errors, mesh_sizes):
