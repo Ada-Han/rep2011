@@ -413,6 +413,7 @@ class ASP_VEM2D:
         return result
 
     # ── 误差计算（基于 VEM Π 投影，多边形形心剖分积分）────────
+    # —— 后验误差部分，包括AMR 等
 
     def compute_l2_error(self, numerical_states, exact_func, age_grid, time_value):
         """空间-年龄 L2 相对误差。
@@ -499,6 +500,67 @@ class ASP_VEM2D:
         for i in range(1, len(errors)):
             rates[i] = np.log(errors[i - 1] / errors[i]) / np.log(mesh_sizes[i - 1] / mesh_sizes[i])
         return rates
+    
+    def compute_gradient_recovery_eta(self, current_states, age_index):
+        "VEM 自适应 后处理：梯度恢复估计"
+
+        uh = current_states[age_index,:]
+
+        D_diag = np.zeros(self.n_nodes)
+        f_x = np.zeros(self.n_nodes)
+        f_y = np.zeros(self.n_nodes)
+
+        # 组装全局平滑梯度系统的矩阵
+        for element_id, element in enumerate(self.elements):
+            node_coords = self.nodes[element]
+            Nv = len(element)
+            area = self.calculate_element_area(element)
+            h_K = self.calculate_element_diameter(node_coords)
+            xc, yc = np.mean(node_coords, axis = 0)
+
+            B = self.calculate_B_matrix(node_coords,h_K)
+            D_vertics = self. calculate_D_matrix(node_coords,xc,yc,h_K)
+            G = self.calculate_G_matrix(B, D_vertics)
+            Pi_star = np.linalg.solve(G, B)
+
+            #构建局部对角阵
+            D_K_diag = np.ones(Nv) * (area / Nv)
+
+            M_1 = np.zeros((Nv,3))
+            M_1[:,1] = 1.0 /h_K
+
+            M_2 = np.zeros((Nv,3))
+            M_2 [:,2] = 1.0 /h_K
+
+            uh_local = uh[element]
+            fx_local = np.diag(D_K_diag) @ M_1 @ Pi_star @ uh_local
+            fy_local = np.diag(D_K_diag) @ M_2 @ Pi_star @ uh_local
+
+            #组装全局
+            D_diag[element] += D_K_diag
+            f_x[element] += fx_local
+            f_y[element] += fy_local
+
+        D_diag[D_diag < 1e-15] = 1e-15
+        g_x = f_x / D_diag
+        g_y = f_y / D_diag
+
+        eta = np.zeros(self.n_elements)
+
+        for element_id, element in enumerate(self.elements):
+            node_coords = self.nodes[element]
+            area = self.calculate_element_area(element)
+            h_K = self.calculate_element_diameter(node_coords)
+
+            uh_local = uh[element]
+            grad_uh_x, grad_uh_y = self.evaluate_gradient_in_element(uh_local, node_coords, h_K)
+
+            mean_gx = np.mean(g_x[element])
+            mean_gy = np.mean(g_y[element])
+
+            eta[element_id] = np.sqrt(area * ((grad_uh_x - mean_gx)**2 + (grad_uh_y - mean_gy)**2))
+
+        return eta
 
 
 def trapezoidal_birth(beta):
