@@ -67,10 +67,15 @@ def test_vem_gradient_recovery():
     # 这一行就是检验你今晚战果的地方！
     eta_array = vem.compute_gradient_recovery_eta(current_states, target_age_index)
 
-    print("🎉 误差评估完成！")
+    marked_ids = vem.mark_elements(eta_array, theta=0.1)
+
+    print(" 误差评估完成！")
     print(f"   - 最大误差 (eta_max): {np.max(eta_array):.6f}")
     print(f"   - 最小误差 (eta_min): {np.min(eta_array):.6f}")
     print(f"   - 平均误差 (eta_avg): {np.mean(eta_array):.6f}")
+
+    print(f"为了消灭 10% 的误差，我们需要切碎 {len(marked_ids)} 个网格！")
+    print(f"这些网格的 ID 是: {marked_ids}")
 
     # =====================================================================
     # 6. 可视化：让大弟子享受成就感的时刻

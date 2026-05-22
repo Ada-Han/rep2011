@@ -561,6 +561,24 @@ class ASP_VEM2D:
             eta[element_id] = np.sqrt(area * ((grad_uh_x - mean_gx)**2 + (grad_uh_y - mean_gy)**2))
 
         return eta
+    def mark_elements(self, eta_array, theta = 0.5):
+
+        total_error_squared = np.sum(eta_array**2)
+
+        target_error_squared = theta**2 * total_error_squared
+
+        sorted_indices = np.argsort(eta_array)[::-1]
+
+        current_sum = 0.0
+        marked_elements = []
+
+        for idx in sorted_indices:
+            current_sum += eta_array[idx]**2
+            marked_elements.append(idx)
+            if current_sum >= target_error_squared:
+                break
+
+        return marked_elements
 
 
 def trapezoidal_birth(beta):
