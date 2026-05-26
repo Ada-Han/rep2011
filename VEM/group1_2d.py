@@ -73,7 +73,7 @@ def interpolate_reference_to_grid(reference_age_grid, reference_profile, target_
 
 
 def scalar_birth_update(profile, dt, beta=BETA):
-    """空间常模态下的标量出生边界更新。"""
+    """空间常模态下标量出生边界更新。"""
     weighted_sum = np.sum(profile[1:-1]) + 0.5 * profile[-1]
     denominator = 1.0 - 0.5 * beta * dt
     if denominator <= 0.0:
@@ -82,7 +82,7 @@ def scalar_birth_update(profile, dt, beta=BETA):
 
 
 def compute_constant_mode_factor(model, dt, age_midpoint, mu_function):
-    """用二维矩阵提取空间常模态的单层推进因子。"""
+    """二维矩阵提取空间常模态的单层推进因子。"""
     lhs, rhs = model.build_system_matrices(dt, age_midpoint, mu_function)
     ones = np.ones(model.n_nodes)
 
@@ -144,7 +144,7 @@ def solve_reduced_constant_mode(model, dt, mu_function, t_stop, store_history=Fa
         # 存放当前时间层的新年龄剖面。
         next_profile = np.zeros_like(current_profile)
 
-        # 沿特征线推进 i = 1, ..., N_a 的年龄层。
+        # 沿特征线推进年龄层。
         for age_index in range(1, n_age + 1):
             next_profile[age_index] = layer_factors[age_index - 1] * current_profile[age_index - 1]
 
@@ -153,7 +153,7 @@ def solve_reduced_constant_mode(model, dt, mu_function, t_stop, store_history=Fa
         # 当前时间层成为下一步的上一时间层。
         current_profile = next_profile
 
-        # 如果要画图，就记录 P(t)=|Omega| * integral c(a,t) da。
+        # 如果画图，记录 P(t)=|Omega| * integral c(a,t) da。
         if store_history:
             global_population[time_index] = domain_measure * composite_trapezoid(current_profile, dt)
 

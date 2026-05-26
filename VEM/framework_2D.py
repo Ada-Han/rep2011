@@ -35,14 +35,12 @@ class ASP_VEM2D:
 
         if nodes is not None and elements is not None:
             self.nodes = np.asarray(nodes, dtype=float)
-            self.elements = np.asarray(elements, dtype=int)
+            # elements 存为 list，支持任意多边形（不等长）
+            self.elements = [np.asarray(e, dtype=int) for e in elements]
             self.auto_generated = False
         else:
             self.nodes, self.elements = self.build_rectangular_mesh()
             self.auto_generated = True
-
-        if self.elements.ndim != 2 or self.elements.shape[1] != 3:
-            raise NotImplementedError("This framework currently only supports P1 triangular elements.")
 
         self.n_nodes = len(self.nodes)
         self.n_elements = len(self.elements)
@@ -561,8 +559,9 @@ class ASP_VEM2D:
             eta[element_id] = np.sqrt(area * ((grad_uh_x - mean_gx)**2 + (grad_uh_y - mean_gy)**2))
 
         return eta
+    
     def mark_elements(self, eta_array, theta = 0.5):
-
+        "标记需要修改的单元"
         total_error_squared = np.sum(eta_array**2)
 
         target_error_squared = theta**2 * total_error_squared
