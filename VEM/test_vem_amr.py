@@ -10,16 +10,15 @@ save_path = os.path.join(image_dir, "VEM_AMR_Error_Test.png")
 
 def test_vem_gradient_recovery():
     print("==================================================")
-    print("🚀 开始测试: 年龄结构种群模型 VEM 求解 + 梯度恢复自适应评估")
-    print("==================================================")
+    print("开始测试AMR")
 
     # 1. 物理参数与网格设置
     dt = 0.1
     t_final = 0.5
     A_max = 2.0  # 最大年龄
-    hx = 0.05    # 网格步长（可以调小一点看更精细的马赛克）
+    hx = 0.05    # 网格步长
     
-    # 实例化你强大的 VEM 求解器
+    
     print("1. 正在初始化 VEM 网格与系统矩阵...")
     vem = ASP_VEM2D(
         x_left=0.0, x_right=1.0, 
@@ -31,9 +30,9 @@ def test_vem_gradient_recovery():
     )
     vem.print_mesh_info()
 
-    # 2. 定义人口模型的死亡率与出生率
+    # 2. 设定模型死亡率与出生率
     def mu_function(age):
-        return 0.1 * age  # 随年龄增长死亡率略微增加
+        return 0.1 * age  # 随年龄增长死亡率增加
 
     def birth_function(current_states, dt):
         # 简单梯形积分算出生率，假设生育率 beta=0.5
@@ -41,8 +40,7 @@ def test_vem_gradient_recovery():
         weighted_sum = np.sum(current_states[1:-1, :], axis=0) + 0.5 * current_states[-1, :]
         return (beta * dt / (1.0 - 0.5 * beta * dt)) * weighted_sum
 
-    # 3. 设置初始条件 (造一个局部的人口聚集高峰，这样梯度的变化才会剧烈)
-    print("\n2. 设置初始人口分布 (局部高斯峰)...")
+    # 3. 设置初始条件 (制造一个局部的人口聚集高峰)
     n_age = int(round(A_max / dt)) + 1
     initial_states = np.zeros((n_age, vem.n_nodes))
     
@@ -53,34 +51,23 @@ def test_vem_gradient_recovery():
         initial_states[0, i] = 10.0 * np.exp(-50.0 * ((x - 0.4)**2 + (y - 0.5)**2))
 
     # 4. 开始演化求解
-    print("\n3. 开始时间推进求解...")
     current_states = vem.solve(dt, initial_states, mu_function, birth_function, t_stop=t_final)
-    print("✅ 求解完成！")
 
-    # =====================================================================
-    # 🌟 5. 核心戏码：调用我们今晚写的“梯度恢复后处理”技能！
-    # =====================================================================
-    print("\n4. 🚀 正在进行 VEM 梯度恢复自适应误差评估...")
-    # 我们来评估年龄层 0（新生儿）在 final 时刻的空间分布误差
+    # 评估年龄层 0（新生儿）在 final 时刻的空间分布误差
     target_age_index = 0  
     
-    # 这一行就是检验你今晚战果的地方！
     eta_array = vem.compute_gradient_recovery_eta(current_states, target_age_index)
-
+    # Dörfler 标记：选取大误差单元，使其误差平方和覆盖总量的 10%。
     marked_ids = vem.mark_elements(eta_array, theta=0.1)
 
-    print(" 误差评估完成！")
+    print(" 误差评估结果！")
     print(f"   - 最大误差 (eta_max): {np.max(eta_array):.6f}")
     print(f"   - 最小误差 (eta_min): {np.min(eta_array):.6f}")
     print(f"   - 平均误差 (eta_avg): {np.mean(eta_array):.6f}")
 
-    print(f"为了消灭 10% 的误差，我们需要切碎 {len(marked_ids)} 个网格！")
-    print(f"这些网格的 ID 是: {marked_ids}")
+    print(f"需要剖分 {len(marked_ids)} 个网格！")
+    print(f"剖分的网格的 ID 为: {marked_ids}")
 
-    # =====================================================================
-    # 6. 可视化：让大弟子享受成就感的时刻
-    # =====================================================================
-    print("\n5. 📊 正在绘制网格误差热力图...")
     centroids_x = []
     centroids_y = []
     
@@ -93,7 +80,7 @@ def test_vem_gradient_recovery():
 
     plt.figure(figsize=(10, 8))
     
-    # 画数值解的等高线背景（看看人口长什么样）
+    # 画数值解的等高线背景
     X = vem.nodes[:, 0]
     Y = vem.nodes[:, 1]
     U = current_states[target_age_index, :]
@@ -107,15 +94,15 @@ def test_vem_gradient_recovery():
     plt.xlabel('X coordinate')
     plt.ylabel('Y coordinate')
     
-    # 标记出误差最大的前 10% 的网格（这就是下一步你需要切碎的网格！）
+    # 标记出误差最大的前 10% 的网格
     threshold = np.percentile(eta_array, 90)
     for i, eta in enumerate(eta_array):
         if eta >= threshold:
             plt.plot(centroids_x[i], centroids_y[i], 'r.', markersize=3)
             
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    print("✅ 图像已保存为 VEM_AMR_Error_Test.png")
+    plt.savefig(save_path, dpi=450)
+    print("图像已保存为 VEM_AMR_Error_Test.png")
     plt.show()
 
 if __name__ == "__main__":

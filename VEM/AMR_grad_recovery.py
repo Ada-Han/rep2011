@@ -3,15 +3,67 @@ import numpy as np
 def get_edge_key(n1, n2):
     return (min(n1,n2),max(n1,n2))
 
+
+def polygon_signed_area(coords):
+    """计算多边形有符号面积；正值表示顶点按逆时针排列。"""
+    x = coords[:, 0]
+    y = coords[:, 1]
+    return 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+
+
+def orient_element_ccw(element, nodes):
+    """保证单元顶点按逆时针顺序存储，便于 VEM 局部矩阵保持一致。"""
+    oriented = [int(v) for v in element]
+    if polygon_signed_area(nodes[oriented]) < 0.0:
+        oriented.reverse()
+    return oriented
+
+
+def validate_polygon_mesh(nodes, elements, area_tol=1e-14):
+    """检查 AMR 前后的多边形网格是否满足当前 VEM 装配的基本要求。"""
+    nodes = np.asarray(nodes, dtype=float)
+    if nodes.ndim != 2 or nodes.shape[1] != 2:
+        raise ValueError("nodes must be an array with shape (n_nodes, 2).")
+
+    edge_counts = {}
+    for elem_idx, element in enumerate(elements):
+        elem = np.asarray(element, dtype=int)
+        if elem.ndim != 1 or len(elem) < 3:
+            raise ValueError(f"Element {elem_idx} must contain at least 3 vertices.")
+        if np.any(elem < 0) or np.any(elem >= len(nodes)):
+            raise ValueError(f"Element {elem_idx} contains an invalid node index.")
+        if len(np.unique(elem)) != len(elem):
+            raise ValueError(f"Element {elem_idx} contains duplicate vertices.")
+
+        area = abs(polygon_signed_area(nodes[elem]))
+        if area <= area_tol:
+            raise ValueError(f"Element {elem_idx} is degenerate or has near-zero area.")
+
+        for i in range(len(elem)):
+            edge = get_edge_key(int(elem[i]), int(elem[(i + 1) % len(elem)]))
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
+    nonmanifold_edges = [edge for edge, count in edge_counts.items() if count > 2]
+    if nonmanifold_edges:
+        raise ValueError(f"Mesh contains non-manifold edges, e.g. {nonmanifold_edges[0]}.")
+
+
 def refine_mesh(nodes, elements, marked_elements):
     """
     形心-边中点 切割法
-    将被标记的N边形单元切割为N个四边形小单元
+    将被标记的 N 边形单元切割为 N 个四边形小单元。
+    未标记邻居会把共享边中点插入自己的顶点序列，从而避免悬挂节点。
     """
+    nodes = np.asarray(nodes, dtype=float)
+    validate_polygon_mesh(nodes, elements)
+
     # 初始化新节点列表（先包含所有旧节点）
     new_nodes = nodes.tolist()
     edge_to_mid = {}
-    marked_set = set(marked_elements)
+    marked_set = {int(elem_idx) for elem_idx in marked_elements}
+    invalid_marked = [idx for idx in marked_set if idx < 0 or idx >= len(elements)]
+    if invalid_marked:
+        raise ValueError(f"marked_elements contains invalid element indices: {invalid_marked}")
 
     for elem_idx in marked_set:
         elem = elements[elem_idx]
@@ -66,7 +118,7 @@ def refine_mesh(nodes, elements, marked_elements):
         
         else:
             
-            # 情况2：未被标记的单元 → 插入悬挂节点
+            # 情况2：未被标记的单元 → 插入邻接细化边的中点，消除悬挂节点。
             
             new_elem = []
             n_vertices = len(elem)
@@ -83,10 +135,14 @@ def refine_mesh(nodes, elements, marked_elements):
                 if edge_key in edge_to_mid:
                     new_elem.append(edge_to_mid[edge_key])
             
-            # 顶点个数可能会变
             new_elements.append(new_elem)
-    
-    return np.array(new_nodes), new_elements, edge_to_mid, centroid_to_id
+
+    new_nodes = np.array(new_nodes, dtype=float)
+    # 统一顶点方向，并在返回前检查退化单元、重复顶点和非流形边。
+    new_elements = [orient_element_ccw(elem, new_nodes) for elem in new_elements]
+    validate_polygon_mesh(new_nodes, new_elements)
+
+    return new_nodes, new_elements, edge_to_mid, centroid_to_id
 
 
 def interpolate_states(old_states, elements, old_nodes_count, new_nodes_count,
